@@ -7,69 +7,118 @@
     <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.2/dist/mindar-image-aframe.prod.js"></script>
 
     <script>
-      // Smoothing configuration
-      const smoothingConfig = {
-        smoothingDelay: 50,
-        smoothingFactor: 0.8,
-        positionThreshold: 0.005,
-        rotationThreshold: 0.5
-      };
-
-      // Smoothing helper class
-      class TrackingSmoothing {
-        constructor(config) {
-          this.config = config;
-          this.lastPosition = { x: 0, y: 0, z: 0 };
-          this.lastRotation = { x: 0, y: 0, z: 0 };
+      class EnhancedSmoothing {
+        constructor() {
+          this.positionBuffer = [];
+          this.rotationBuffer = [];
+          this.bufferSize = 15;
+          this.weightDecay = 0.85;
           this.isTracking = false;
+          this.lastStablePosition = { x: 0, y: 0, z: 0 };
+          this.lastStableRotation = { x: 0, y: 0, z: 0 };
+          this.stabilityThreshold = 0.002;
+          this.rotationThreshold = 0.1;
         }
 
-        smoothPosition(newPos) {
+        calculateWeightedAverage(buffer) {
+          if (buffer.length === 0) return null;
+          
+          let totalWeight = 0;
+          let result = { x: 0, y: 0, z: 0 };
+          
+          for (let i = 0; i < buffer.length; i++) {
+            const weight = Math.pow(this.weightDecay, buffer.length - 1 - i);
+            result.x += buffer[i].x * weight;
+            result.y += buffer[i].y * weight;
+            result.z += buffer[i].z * weight;
+            totalWeight += weight;
+          }
+          
+          result.x /= totalWeight;
+          result.y /= totalWeight;
+          result.z /= totalWeight;
+          
+          return result;
+        }
+
+        calculateMovement(newValue, lastStable) {
+          return Math.sqrt(
+            Math.pow(newValue.x - lastStable.x, 2) +
+            Math.pow(newValue.y - lastStable.y, 2) +
+            Math.pow(newValue.z - lastStable.z, 2)
+          );
+        }
+
+        smoothPosition(newPosition) {
           if (!this.isTracking) {
-            this.lastPosition = newPos;
-            return newPos;
+            this.lastStablePosition = newPosition;
+            return newPosition;
           }
 
-          const smoothed = {
-            x: this.smoothValue(this.lastPosition.x, newPos.x, this.config.positionThreshold),
-            y: this.smoothValue(this.lastPosition.y, newPos.y, this.config.positionThreshold),
-            z: this.smoothValue(this.lastPosition.z, newPos.z, this.config.positionThreshold)
+          this.positionBuffer.push(newPosition);
+          if (this.positionBuffer.length > this.bufferSize) {
+            this.positionBuffer.shift();
+          }
+
+          const smoothed = this.calculateWeightedAverage(this.positionBuffer);
+          if (!smoothed) return this.lastStablePosition;
+
+          const movement = this.calculateMovement(smoothed, this.lastStablePosition);
+          
+          if (movement < this.stabilityThreshold) {
+            return this.lastStablePosition;
+          }
+
+          const result = {
+            x: this.lastStablePosition.x + (smoothed.x - this.lastStablePosition.x) * 0.1,
+            y: this.lastStablePosition.y + (smoothed.y - this.lastStablePosition.y) * 0.1,
+            z: this.lastStablePosition.z + (smoothed.z - this.lastStablePosition.z) * 0.1
           };
 
-          this.lastPosition = smoothed;
-          return smoothed;
+          this.lastStablePosition = result;
+          return result;
         }
 
-        smoothRotation(newRot) {
+        smoothRotation(newRotation) {
           if (!this.isTracking) {
-            this.lastRotation = newRot;
-            return newRot;
+            this.lastStableRotation = newRotation;
+            return newRotation;
           }
 
-          const smoothed = {
-            x: this.smoothValue(this.lastRotation.x, newRot.x, this.config.rotationThreshold),
-            y: this.smoothValue(this.lastRotation.y, newRot.y, this.config.rotationThreshold),
-            z: this.smoothValue(this.lastRotation.z, newRot.z, this.config.rotationThreshold)
+          this.rotationBuffer.push(newRotation);
+          if (this.rotationBuffer.length > this.bufferSize) {
+            this.rotationBuffer.shift();
+          }
+
+          const smoothed = this.calculateWeightedAverage(this.rotationBuffer);
+          if (!smoothed) return this.lastStableRotation;
+
+          const movement = this.calculateMovement(smoothed, this.lastStableRotation);
+          
+          if (movement < this.rotationThreshold) {
+            return this.lastStableRotation;
+          }
+
+          const result = {
+            x: this.lastStableRotation.x + (smoothed.x - this.lastStableRotation.x) * 0.08,
+            y: this.lastStableRotation.y + (smoothed.y - this.lastStableRotation.y) * 0.08,
+            z: this.lastStableRotation.z + (smoothed.z - this.lastStableRotation.z) * 0.08
           };
 
-          this.lastRotation = smoothed;
-          return smoothed;
-        }
-
-        smoothValue(current, target, threshold) {
-          const diff = target - current;
-          if (Math.abs(diff) < threshold) {
-            return current;
-          }
-          return current + (diff * this.config.smoothingFactor);
+          this.lastStableRotation = result;
+          return result;
         }
 
         setTracking(status) {
           this.isTracking = status;
+          if (!status) {
+            this.positionBuffer = [];
+            this.rotationBuffer = [];
+          }
         }
       }
 
-      const smoothing = new TrackingSmoothing(smoothingConfig);
+      const smoothing = new EnhancedSmoothing();
 
       const showInfo = () => {
         let y = 0;
@@ -183,6 +232,9 @@
 
       AFRAME.registerComponent('mytarget', {
         init: function () {
+          let lastUpdateTime = 0;
+          const updateInterval = 1000 / 60;
+
           this.el.addEventListener('targetFound', event => {
             console.log("target found");
             smoothing.setTracking(true);
@@ -206,23 +258,27 @@
           this.el.object3D.rotation.set(0, 0, 0);
 
           this.el.addEventListener('update', event => {
+            const currentTime = Date.now();
+            if (currentTime - lastUpdateTime < updateInterval) {
+              return;
+            }
+            lastUpdateTime = currentTime;
+
             if (!event.detail || !event.detail.position || !event.detail.rotation) return;
 
             const smoothedPosition = smoothing.smoothPosition(event.detail.position);
             const smoothedRotation = smoothing.smoothRotation(event.detail.rotation);
 
-            setTimeout(() => {
-              this.el.object3D.position.set(
-                smoothedPosition.x,
-                smoothedPosition.y,
-                smoothedPosition.z
-              );
-              this.el.object3D.rotation.set(
-                THREE.MathUtils.degToRad(smoothedRotation.x),
-                THREE.MathUtils.degToRad(smoothedRotation.y),
-                THREE.MathUtils.degToRad(smoothedRotation.z)
-              );
-            }, smoothingConfig.smoothingDelay);
+            this.el.object3D.position.set(
+              smoothedPosition.x,
+              smoothedPosition.y,
+              smoothedPosition.z
+            );
+            this.el.object3D.rotation.set(
+              THREE.MathUtils.degToRad(smoothedRotation.x),
+              THREE.MathUtils.degToRad(smoothedRotation.y),
+              THREE.MathUtils.degToRad(smoothedRotation.z)
+            );
           });
         }
       });
@@ -319,10 +375,10 @@
         mindar-image="imageTargetSrc: https://cdn.jsdelivr.net/gh/rohitmenonhart-xhunter/mindfiles@4a0c5cba25e27bbfbacc34d6fa62cf99b149d115/targets%20(1).mind; 
         showStats: false; 
         uiScanning: #example-scanning-overlay;
-        smoothCount: 10;
-        smoothTolerance: 0.01;
-        filterMinCF: 0.001;
-        filterBeta: 1000;" 
+        smoothCount: 30;
+        smoothTolerance: 0.005;
+        filterMinCF: 0.0001;
+        filterBeta: 10000;" 
         embedded 
         color-space="sRGB" 
         renderer="colorManagement: true, physicallyCorrectLights" 
